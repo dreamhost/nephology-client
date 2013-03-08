@@ -8,6 +8,7 @@ use Try::Tiny;
 use Data::Dumper;
 use File::Temp;
 
+my $debug;
 my $version = 3;
 my $neph_server = undef;
 my $mac_addr = undef;
@@ -18,6 +19,7 @@ my $nephology_commands = undef;
 GetOptions(
     'server|s=s' => \$neph_server,
     'mac|m=s' => \$mac_addr,
+    'debug' => \$debug,
     );
 
 if (!defined($neph_server)) {
@@ -39,106 +41,90 @@ while ($work_to_do == 1) {
 	'X-Nephology-Client-Version' => $version,
 	);
 
+    print "RESPONSE CODE: ".$response->code."\n" if $debug;
+    print "CONTENT\n ".$response->decoded_content."\n" if $debug;
+
     if(! $response->is_success) {
-	print("Node not found, going to create a stub. Waiting 30s for network crap.\n");
-	sleep 30;
-	print("Gathering OHAI data...");
-	my $ohai_data = `sudo ohai`;
-	print("done.\n");
-	print("Sending...");
-	my $ohai_response = $browser->post(
-		"http://" . $neph_server . "/nephology/node/" . $mac_addr,
-        	'X-Nephology-Client-Version' => $version,
-		Content => [
-			'ohai' => $ohai_data,
-		],
-	);
-	if ($ohai_response->is_success) {
-		print("Done!\nNode created, will try installation again in 15sec\n");
-		sleep 15;
-		next;
-	} else {
-	        print("Nope.\nNo successful response, waiting for 5min before trying again\n");
-	        sleep 300;
-	        next;
-	} # if ohai reponse
-    } # if reponse
+        if ($response->code  >= '500') {&wait(60,"Response was ".$response->code.". Nephology-server is broken") && next };
+        &wait(15,"Node not found, going to create a stub.\n");
+        print("Gathering OHAI data...");
+        my $ohai_data = `ohai`;
+        print("done.\n");
+        print("Sending...");
+        my $ohai_response = $browser->post(
+                        "http://" . $neph_server . "/nephology/node/" . $mac_addr,
+                        'X-Nephology-Client-Version' => $version,
+                        Content => [
+                        'ohai' => $ohai_data,
+                        ],);
+        if ($ohai_response->is_success) {
+            &wait(15,"Done!\nNode created, will try installation again in 15sec\n");
+               next;
+        } else {
+            &wait(300,"Nope.\nNo successful response, waiting for 5min before trying again\n");
+            next;
+        } # if ohai reponse
+    } # if not success
 
     print("Got a response, processing...\n");
     try {
         $nephology_commands = JSON->new->utf8->decode($response->decoded_content);
     } catch {
-        print("Resonse wasn't valid JSON, waiting for 5min before trying again\n");
-        sleep 300;
+        &wait(300,"Resonse wasn't valid JSON, waiting for 5min before trying again\n");
         next;
     };
-    #print(Dumper($nephology_commands));
+
+    print(Dumper($nephology_commands)) if $debug;
 
     if ( $nephology_commands->{'version_required'} > $version ) {
         print("This client is out of date for the Nephology server\n");
         print("Rebooting to fetch a fresh client.\n");
         unlink("incomplete");
-        while (1) { sleep(10) };
+        system("reboot -f");
         exit 0;
     }
 
-    foreach my $reqhash (@{$nephology_commands->{'runlist'}}) {
-        print("Got rule [$reqhash->{'id'}], going to try and process it.");
-        if ($reqhash->{'type_id'} == 1) {
-            my $tmp = File::Temp->new();
-            my $tmp_fn = $tmp->filename;
-            my $data = $browser->get(
-                "http://" . $neph_server . "/nephology/install/" . $mac_addr . "/" . $reqhash->{'id'},
-                'X-Nephology-Client-Version' => $version,
-                );
-            if (! $data->is_success) { failure("Could not get data for $reqhash->{'rule_id'}"); }
-            print $tmp $data->decoded_content;
-            system("bash $tmp_fn");
-            my $retcode = $?;
-            if ($retcode > 0) {failure("Bad exec for rule [$reqhash->{'rule_id'}]: " . $?);}
-        }
-        elsif ($reqhash->{'type_id'} == 4) {
-            my $tmp = File::Temp->new();
-            my $tmp_fn = $tmp->filename;
-            my $data = $browser->get(
-                "http://" . $neph_server . "/nephology/install/" . $mac_addr . "/" . $reqhash->{'id'},
-                'X-Nephology-Client-Version' => $version,
-                );
-            if (! $data->is_success) { failure("Could not get data for $reqhash->{'rule_id'}"); }
-            print $tmp $data->decoded_content;
-            system("sudo bash $tmp_fn");
-            my $retcode = $?;
-            if ($retcode > 0) {failure("Bad exec for rule [$reqhash->{'rule_id'}]: " . $?);}
-        }
-        elsif ($reqhash->{'type_id'} == 2) {
-            my $data = $browser->get(
-                "http://" . $neph_server . "/nephology/install/" . $mac_addr . "/" . $reqhash->{'id'},
-                'X-Nephology-Client-Version' => $version,
-                );
-            if (! $data->is_success) { failure("Reboot requested by rule [$reqhash->{'rule_id'}] but server had error!"); }
-            print("*********** RESTART REQUESTED BY RULE [$reqhash->{'rule_id'}] IN PROGRESS\n");
-            unlink("incomplete");
-            while (1) { sleep(10) };
-        }
-        elsif ($reqhash->{'type_id'} == 3) {
-            my $data = $browser->get(
-                "http://" . $neph_server . "/nephology/install/" . $mac_addr . "/" . $reqhash->{'id'},
-                'X-Nephology-Client-Version' => $version,
-                );
-            if (! $data->is_success) { failure("Could not get data for $reqhash->{'rule_id'}"); }
-            print("Server side rule output follows:\n");
-            print($data->decoded_content . "\n");
-        }
-        else {
-            print("Got unsupported command: " . JSON->new->utf8->encode($reqhash) . "\n");
-        }
+    # if we have nothing to do , wait around for something to do
+    unless (scalar(@{$nephology_commands->{'runlist'}})) {
+        &wait(30,"Runlist is empty");
+        next;
     }
 
-    print("End of run. Waiting 90 seconds before continuing.\n");
-    sleep(90);
+    # when we have rules, run them + make sure all of the pass. if not we will
+    # continue the process unltil we finish
+    my $success_rule = 0;
+    foreach my $reqhash (@{$nephology_commands->{'runlist'}}) {
+        my $tmp = File::Temp->new();
+        my $tmp_fn = $tmp->filename;
+        print("Got rule [$reqhash->{'id'}] (".substr($reqhash->{'description'},0,50)."), grabbing to $tmp_fn.\n");
+        my $data = $browser->get(
+                        "http://" . $neph_server . "/nephology/install/" . $mac_addr . "/" . $reqhash->{'id'},
+                        'X-Nephology-Client-Version' => $version,
+                        );
+        if (! $data->is_success) { failure("Could not get data for $reqhash->{'rule_id'} $tmp_fn"); }
+        print $tmp $data->decoded_content;
+        system("chmod 755 $tmp_fn ; bash $tmp_fn");
+        my $retcode = $?;
+        if ($retcode > 0) {failure("Bad exec for rule [$reqhash->{'rule_id'}]: " . $?);}
+        $success_rule++;
+    }
+    print("Passed $success_rule out of ".scalar(@{$nephology_commands->{'runlist'}})." rules\n");
+    if ($success_rule >= scalar(@{$nephology_commands->{'runlist'}})) {
+        print("All Done!\n");
+        $work_to_do = 0;
+    } else {
+        &wait(20,"End of run.i Waiting 20 seconds before continuing.\n");
+    }
 }
 
 exit 0;
+
+sub wait {
+    my $time = shift || "30"; # default to 30 seconds of wait
+    my $reason = shift || "Just waiting around for fun";
+    print("Waiting $time seconds. $reason\n");
+    sleep $time;
+}
 
 sub failure {
     my $message = shift;
