@@ -37,7 +37,7 @@ while ($work_to_do == 1) {
     print "Getting worklist from $neph_server for $mac_addr\n";
     # Grab the worklist from the Nepology Server
     my $response = $browser->get(
-	"http://" . $neph_server . "/nephology/install/" . $mac_addr,
+	"http://" . $neph_server . "/install/" . $mac_addr,
 	'X-Nephology-Client-Version' => $version,
 	);
 
@@ -47,21 +47,17 @@ while ($work_to_do == 1) {
     if(! $response->is_success) {
         if ($response->code  >= '500') {&wait(60,"Response was ".$response->code.". Nephology-server is broken") && next };
         &wait(15,"Node not found, going to create a stub.\n");
-        print("Gathering OHAI data...");
-        my $ohai_data = `ohai`;
         print("done.\n");
         print("Sending...");
-        my $ohai_response = $browser->post(
-                        "http://" . $neph_server . "/nephology/node/" . $mac_addr,
+        my $response_install = $browser->post(
+                        "http://" . $neph_server . "/install/" . $mac_addr,
                         'X-Nephology-Client-Version' => $version,
-                        Content => [
-                        'ohai' => $ohai_data,
-                        ],);
-        if ($ohai_response->is_success) {
+                        Content => '{}');
+        if ($response_install->is_success) {
             &wait(15,"Done!\nNode created, will try installation again in 15sec\n");
                next;
         } else {
-            &wait(300,"Nope.\nNo successful response, waiting for 5min before trying again\n");
+            &wait(30,"Nope.\nNo successful response, waiting for 5min before trying again\n");
             next;
         } # if ohai reponse
     } # if not success
@@ -70,7 +66,7 @@ while ($work_to_do == 1) {
     try {
         $nephology_commands = JSON->new->utf8->decode($response->decoded_content);
     } catch {
-        &wait(300,"Resonse wasn't valid JSON, waiting for 5min before trying again\n");
+        &wait(30,"Resonse wasn't valid JSON, waiting for 5min before trying again\n");
         next;
     };
 
@@ -98,12 +94,12 @@ while ($work_to_do == 1) {
         my $tmp_fn = $tmp->filename;
         print("Got rule [$reqhash->{'id'}] (".substr($reqhash->{'description'},0,50)."), grabbing to $tmp_fn.\n");
         my $data = $browser->get(
-                        "http://" . $neph_server . "/nephology/install/" . $mac_addr . "/" . $reqhash->{'id'},
+                        "http://" . $neph_server . "/install/" . $mac_addr . "/" . $reqhash->{'id'},
                         'X-Nephology-Client-Version' => $version,
                         );
         if (! $data->is_success) { failure("Could not get data for $reqhash->{'rule_id'} $tmp_fn"); }
         print $tmp $data->decoded_content;
-        system("chmod 755 $tmp_fn ; bash $tmp_fn");
+        system("chmod 755 $tmp_fn ; sudo $tmp_fn");
         my $retcode = $?;
         if ($retcode > 0) {failure("Bad exec for rule [$reqhash->{'rule_id'}]: " . $?);}
         $success_rule++;
@@ -128,7 +124,9 @@ sub wait {
 
 sub failure {
     my $message = shift;
-    system("sudo ipmitool chassis identify force");
+    if ( -e "/dev/ipmi0" ) {
+        system("sudo ipmitool chassis identify force");
+    }
     print("CLIENT FAILURE: " . $message . "\n");
     while (1) { sleep(10) };
 }
